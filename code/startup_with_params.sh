@@ -1,0 +1,3 @@
+ls /
+mkdir newdir
+ls
