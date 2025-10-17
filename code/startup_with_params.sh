@@ -1,3 +1,0 @@
-ls /
-mkdir newdir
-ls
