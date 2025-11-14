@@ -8,6 +8,7 @@ from urllib.parse import urljoin
 from collections import deque, defaultdict
 import subprocess
 import platform
+import argparse
 
 class ConfigError(Exception):
     """Базовый класс для ошибок конфигурации"""
@@ -27,13 +28,12 @@ class DependencyVisualizer:
         'load_order': bool,  # Для этапа 4
         'plantuml_jar': str  # Для этапа 5
     }
-    CONFIG_FILE = 'config.ini'
-    CONFIG_SECTION = 'settings'
     VALID_REPO_MODES = {'online', 'offline', 'test'}
     NPM_REGISTRY_URL = 'https://registry.npmjs.org/'
     PLANTUML_URL = "https://sourceforge.net/projects/plantuml/files/plantuml.jar/download"
 
-    def __init__(self):
+    def __init__(self, config_file):
+        self.config_file = config_file
         self.config = configparser.ConfigParser()
         self.params = {}
         self.test_graph = None
@@ -42,20 +42,26 @@ class DependencyVisualizer:
 
     def load_config(self):
         """Загружает и валидирует конфигурацию"""
-        if not os.path.exists(self.CONFIG_FILE):
-            raise ConfigError(f"Конфигурационный файл '{self.CONFIG_FILE}' не найден")
+        # Проверяем наличие файла
+        if not os.path.exists(self.config_file):
+            print(f"Файл конфигурации '{self.config_file}' не найден в текущей директории.", file=sys.stderr)
+            print(f"Текущая директория: {os.getcwd()}", file=sys.stderr)
+            print("\nСоздание примера конфигурационного файла...", file=sys.stderr)
+            self._create_example_config()
+            raise ConfigError(f"Создан пример конфигурации в '{self.config_file}'. Отредактируйте его и запустите программу снова.")
         
         try:
-            self.config.read(self.CONFIG_FILE)
+            self.config.read(self.config_file)
         except configparser.Error as e:
             raise ConfigError(f"Ошибка чтения конфигурации: {str(e)}")
         
-        if not self.config.has_section(self.CONFIG_SECTION):
-            raise ConfigError(f"Отсутствует секция [{self.CONFIG_SECTION}] в конфигурации")
+        # Проверяем наличие секции настроек
+        if not self.config.has_section('settings'):
+            raise ConfigError(f"Отсутствует секция [settings] в конфигурационном файле")
         
         # Загружаем параметры с валидацией
         for param, param_type in self.REQUIRED_PARAMS.items():
-            if not self.config.has_option(self.CONFIG_SECTION, param):
+            if not self.config.has_option('settings', param):
                 # Для совместимости с предыдущими этапами
                 if param in ('load_order', 'plantuml_jar'):
                     default_value = "false" if param == 'load_order' else ""
@@ -63,7 +69,7 @@ class DependencyVisualizer:
                     continue
                 raise ConfigError(f"Отсутствует обязательный параметр: {param}")
             
-            raw_value = self.config.get(self.CONFIG_SECTION, param).strip()
+            raw_value = self.config.get('settings', param).strip()
             try:
                 self.params[param] = self._convert_value(raw_value, param_type)
             except ValueError as e:
@@ -85,16 +91,47 @@ class DependencyVisualizer:
         if self.params['output_image'].lower().endswith('.png'):
             jar_path = self.params['plantuml_jar']
             if not jar_path:
-                raise ConfigError("Для генерации PNG требуется указать путь к plantuml.jar")
+                raise ConfigError("Для генерации PNG требуется указать путь к plantuml.jar в конфигурации")
             if not os.path.exists(jar_path):
                 raise ConfigError(f"Файл plantuml.jar не найден по пути: {jar_path}\n"
                                  f"Скачайте его с: {self.PLANTUML_URL}")
+
+    def _create_example_config(self):
+        """Создает пример конфигурационного файла"""
+        example_config = f"""[settings]
+package_name = express
+repository_path = {self.NPM_REGISTRY_URL}
+repository_mode = online
+output_image = dependency_graph.png
+ascii_tree = true
+load_order = true
+plantuml_jar = ./plantuml.jar
+"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                f.write(example_config)
+            print(f"Пример конфигурации успешно создан в '{self.config_file}'", file=sys.stderr)
+            
+            # Создаем пример тестового графа для режима test
+            test_graph = {
+                "A": ["B", "C"],
+                "B": ["D"],
+                "C": ["D"],
+                "D": []
+            }
+            test_file = "test_graph.json"
+            with open(test_file, 'w', encoding='utf-8') as f:
+                json.dump(test_graph, f, indent=2)
+            print(f"Пример тестового графа создан в '{test_file}'", file=sys.stderr)
+        except Exception as e:
+            print(f"Ошибка создания примера конфигурации: {str(e)}", file=sys.stderr)
 
     def _load_test_graph(self):
         """Загружает тестовый граф из файла"""
         test_file = self.params['repository_path']
         if not os.path.exists(test_file):
-            raise ConfigError(f"Тестовый файл '{test_file}' не найден")
+            raise ConfigError(f"Тестовый файл '{test_file}' не найден.\n"
+                             f"Создайте файл с графом зависимостей или измените путь в конфигурации.")
         
         try:
             with open(test_file, 'r', encoding='utf-8') as f:
@@ -135,7 +172,7 @@ class DependencyVisualizer:
         print("-" * 40)
         for param, value in self.params.items():
             if param == 'plantuml_jar' and value:
-                value = os.path.basename(value)
+                value = os.path.basename(value) if os.path.exists(value) else value
             print(f"{param.replace('_', ' ').title()}: {value}")
         if self.params['repository_mode'].lower() == 'test' and self.test_graph:
             print("\nТестовый граф:")
@@ -338,6 +375,10 @@ class DependencyVisualizer:
         output_path = self.params['output_image']
         puml_path = os.path.splitext(output_path)[0] + ".puml"
         
+        # Создаем директорию для вывода, если её нет
+        output_dir = os.path.dirname(os.path.abspath(output_path))
+        os.makedirs(output_dir, exist_ok=True)
+        
         # Сохраняем PlantUML-код в файл
         with open(puml_path, 'w', encoding='utf-8') as f:
             f.write(puml_content)
@@ -349,9 +390,12 @@ class DependencyVisualizer:
             if platform.system() == "Windows":
                 java_cmd = "java.exe"
             
+            # Проверяем наличие java
+            subprocess.run([java_cmd, "-version"], capture_output=True, text=True, check=True)
+            
             # Выполняем команду PlantUML
             result = subprocess.run(
-                [java_cmd, "-jar", jar_path, puml_path, "-tpng", "-o", os.path.dirname(os.path.abspath(output_path))],
+                [java_cmd, "-jar", jar_path, puml_path, "-tpng"],
                 capture_output=True,
                 text=True,
                 check=True
@@ -360,16 +404,17 @@ class DependencyVisualizer:
             print(f"\nИзображение успешно сохранено: {output_path}")
             print(f"PlantUML-код сохранен: {puml_path}")
             
-            # Удаляем .puml файл если не нужен
-            if not self.params['ascii_tree']:
-                os.remove(puml_path)
-                
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Ошибка генерации PNG: {e.stderr}", file=sys.stderr)
+            print(f"Ошибка генерации PNG: {e.stderr or e.stdout}", file=sys.stderr)
+            print(f"Команда: java -jar {jar_path} {puml_path} -tpng", file=sys.stderr)
             return False
         except FileNotFoundError:
             print(f"Java не найдена. Убедитесь, что Java установлена и добавлена в PATH", file=sys.stderr)
+            print("Для установки Java:", file=sys.stderr)
+            print("- Windows: https://adoptium.net/", file=sys.stderr)
+            print("- macOS: brew install openjdk", file=sys.stderr)
+            print("- Linux: sudo apt install default-jre", file=sys.stderr)
             return False
         except Exception as e:
             print(f"Неизвестная ошибка при генерации PNG: {str(e)}", file=sys.stderr)
@@ -448,7 +493,7 @@ class DependencyVisualizer:
                 self.print_load_order()
             
             # Этап 5: Визуализация
-            if self.params['output_image']:
+            if self.params['output_image'] and self.params['output_image'].lower().endswith('.png'):
                 puml_code = self.generate_plantuml_code()
                 self.generate_png_from_plantuml(puml_code)
             
@@ -459,59 +504,51 @@ class DependencyVisualizer:
             return 0
             
         except ConfigError as e:
-            print(f"ОШИБКА КОНФИГУРАЦИИ: {e}", file=sys.stderr)
-            print("\nПример корректного config.ini:", file=sys.stderr)
-            print(self._get_config_example(), file=sys.stderr)
+            print(f"\nОШИБКА КОНФИГУРАЦИИ: {e}", file=sys.stderr)
+            print("\nДоступные режимы работы:", file=sys.stderr)
+            print("1. ONLINE: Анализ реальных пакетов npm через интернет", file=sys.stderr)
+            print("2. OFFLINE: Анализ локальных JSON-файлов с метаданными", file=sys.stderr)
+            print("3. TEST: Анализ тестового графа с пакетами из больших букв\n", file=sys.stderr)
             return 1
         
         except PackageFetchError as e:
-            print(f"ОШИБКА ЗАГРУЗКИ ДАННЫХ: {e}", file=sys.stderr)
+            print(f"\nОШИБКА ЗАГРУЗКИ ДАННЫХ: {e}", file=sys.stderr)
+            if self.params.get('repository_mode', '').lower() == 'offline':
+                print("\nПодсказка для offline-режима:", file=sys.stderr)
+                print("Убедитесь, что в директории репозитория есть файлы вида '<пакет>.json'", file=sys.stderr)
             return 1
         
         except Exception as e:
-            print(f"НЕОБРАБОТАННАЯ ОШИБКА: {e}", file=sys.stderr)
+            print(f"\nНЕОБРАБОТАННАЯ ОШИБКА: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
             return 1
 
-    def _get_config_example(self):
-        """Возвращает пример корректного конфига"""
-        online_example = f"""
-[{self.CONFIG_SECTION}]
-package_name = express
-repository_path = {self.NPM_REGISTRY_URL}
-repository_mode = online
-output_image = graph.png
-ascii_tree = true
-load_order = true
-plantuml_jar = ./plantuml.jar
-        """.strip()
-        
-        test_example = f"""
-[{self.CONFIG_SECTION}]
-package_name = A
-repository_path = ./test_graph.json
-repository_mode = test
-output_image = test_graph.png
-ascii_tree = true
-load_order = true
-plantuml_jar = ./plantuml.jar
-        """.strip()
-        
-        return (
-            f"Режим ONLINE:\n{online_example}\n\n"
-            f"Режим TEST (пример файла ./test_graph.json):\n"
-            "{\n"
-            '  "A": ["B", "C"],\n'
-            '  "B": ["D"],\n'
-            '  "C": ["D"],\n'
-            '  "D": []\n'
-            "}\n\n"
-            f"Конфигурация для режима TEST:\n{test_example}\n\n"
-            "Для генерации PNG требуется plantuml.jar:\n"
-            "Скачайте его с https://sourceforge.net/projects/plantuml/files/plantuml.jar/download"
-        )
+def main():
+    """Основная функция с обработкой аргументов командной строки"""
+    parser = argparse.ArgumentParser(description='Визуализатор графа зависимостей пакетов')
+    parser.add_argument('--config', '-c', default='config.ini',
+                        help='Путь к конфигурационному файлу (по умолчанию: config.ini)')
+    parser.add_argument('--init', '-i', action='store_true',
+                        help='Создать пример конфигурационного файла и выйти')
+    
+    args = parser.parse_args()
+    
+    # Если указан флаг --init, создаем пример конфигурации и выходим
+    if args.init:
+        app = DependencyVisualizer(args.config)
+        try:
+            app._create_example_config()
+            print(f"\nПример конфигурации создан в '{args.config}'")
+            print("Отредактируйте файл и запустите программу без флага --init")
+            return 0
+        except Exception as e:
+            print(f"Ошибка создания конфигурации: {e}", file=sys.stderr)
+            return 1
+    
+    # Запускаем основную программу
+    app = DependencyVisualizer(args.config)
+    return app.run()
 
 if __name__ == "__main__":
-    app = DependencyVisualizer()
-    sys.exit(app.run())
+    sys.exit(main())
